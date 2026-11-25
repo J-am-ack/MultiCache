@@ -32,6 +32,9 @@ from wan.utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
 from wan.utils.prompt_extend import DashScopePromptExpander, QwenPromptExpander
 from wan.utils.utils import cache_image, cache_video, str2bool
 
+from spatial_cache import block_refresh_masks, hybrid_refresh_ratio
+from partial_query import dense_stack_with_residuals, partial_query_stack
+
 
 # =============================================================================
 # SenCache: Jacobian-based sensitivity caching for diffusion model inference
@@ -64,7 +67,7 @@ def sencache_forward(
     if y is not None:
         x = [torch.cat([u, v], dim=0) for u, v in zip(x, y)]
 
-    # --- SenCache: decide whether to skip this step ---
+    # --- SenCache / block-wise spatial cache decision state ---
     z_t = x[0]  # VAE latent
     t_val = t
     is_cond = (self.cnt % 2 == 0)  # even = conditional, odd = unconditional
@@ -78,7 +81,62 @@ def sencache_forward(
 
     is_in_skip_zone = (self.cnt >= self.ret_steps) and (self.cnt < self.cutoff_steps)
 
-    if is_cond:
+    spatial_enabled = getattr(self, 'spatial_cache_enabled', False)
+    hybrid_enabled = getattr(self, 'hybrid_cache_enabled', False)
+    if spatial_enabled:
+        # The conditional pass owns the mask; CFG-unconditional reuses it.
+        if is_cond:
+            self.skip_this_step = False
+    elif hybrid_enabled and is_cond:
+        # Three-level SenCache decision: full reuse, local refresh, or full refresh.
+        self.hybrid_refresh_ratio = None
+        if is_in_skip_zone and self.cached_z is not None:
+            norm_delta_z = torch.norm(z_t - self.cached_z).item()
+            if self.cached_t_map is None:
+                norm_delta_t = torch.abs(t_val - self.cached_t).item()
+            else:
+                norm_delta_t = torch.abs(t_val - self.cached_t_map).max().item()
+            sensitivity_error = (self.cached_J_z_norm * norm_delta_z) + (
+                self.cached_J_t_norm * norm_delta_t)
+            full_threshold = current_threshold * self.hybrid_full_multiplier
+            self.hybrid_sensitivity_errors.append(sensitivity_error)
+
+            if sensitivity_error < current_threshold:
+                if self.accumulated_skips < self.sencache_K:
+                    self.hybrid_decision = 'reuse'
+                    should_calculate = False
+                    self.skip_this_step = True
+                    self.accumulated_skips += 1
+                    self.current_skip_count += 2
+                    self.hybrid_reuse_calls += 2
+                else:
+                    # Preserve SenCache's safety invariant: K reuse steps must
+                    # be followed by a dense refresh, not a small local update.
+                    self.hybrid_decision = 'full'
+                    self.skip_this_step = False
+                    self.accumulated_skips = 0
+                    self.hybrid_full_calls += 2
+            elif sensitivity_error < full_threshold:
+                self.hybrid_decision = 'partial'
+                self.hybrid_refresh_ratio = max(
+                    self.hybrid_min_ratio,
+                    hybrid_refresh_ratio(
+                        sensitivity_error, current_threshold, full_threshold,
+                        self.hybrid_min_ratio))
+                self.skip_this_step = False
+                self.accumulated_skips = 0
+                self.hybrid_partial_calls += 2
+            else:
+                self.hybrid_decision = 'full'
+                self.skip_this_step = False
+                self.accumulated_skips = 0
+                self.hybrid_full_calls += 2
+        else:
+            self.hybrid_decision = 'full'
+            self.skip_this_step = False
+            self.accumulated_skips = 0
+            self.hybrid_full_calls += 2
+    elif is_cond:
         # CONDITIONAL pass: make the caching decision for this denoising step
         if is_in_skip_zone and self.cached_z is not None:
             norm_delta_z = torch.norm(z_t - self.cached_z).item()
@@ -112,6 +170,58 @@ def sencache_forward(
         torch.cat([u, u.new_zeros(1, seq_len - u.size(1), u.size(2))],
                    dim=1) for u in x
     ])
+
+    refresh_token_mask = None
+    refresh_latent_mask = None
+    local_refresh_enabled = spatial_enabled or (
+        hybrid_enabled and self.hybrid_decision == 'partial')
+    if local_refresh_enabled:
+        if is_cond:
+            if is_in_skip_zone and self.cached_z is not None:
+                refresh_ratio = (self.spatial_cache_refresh_ratio if spatial_enabled
+                                 else self.hybrid_refresh_ratio)
+                refresh_token_mask, refresh_latent_mask, block_scores = block_refresh_masks(
+                    z_t, self.cached_z, grid_sizes[0].tolist(),
+                    self.spatial_cache_block_shape, refresh_ratio)
+                refresh_token_mask = refresh_token_mask.to(device=x.device)
+                if refresh_token_mask.shape[1] < x.shape[1]:
+                    refresh_token_mask = F.pad(
+                        refresh_token_mask,
+                        (0, 0, 0, x.shape[1] - refresh_token_mask.shape[1]),
+                        value=False)
+                elif refresh_token_mask.shape[1] > x.shape[1]:
+                    raise ValueError("Spatial refresh mask exceeds padded token sequence")
+                refresh_latent_mask = refresh_latent_mask.to(device=z_t.device)
+                self.spatial_refresh_token_mask = refresh_token_mask
+                self.spatial_refresh_latent_mask = refresh_latent_mask
+                self.spatial_last_score_mean = block_scores.mean().item()
+                should_calculate = bool(refresh_token_mask.any().item())
+                self.skip_this_step = not should_calculate
+            else:
+                self.spatial_refresh_token_mask = None
+                self.spatial_refresh_latent_mask = None
+                should_calculate = True
+                self.skip_this_step = False
+        else:
+            refresh_token_mask = self.spatial_refresh_token_mask
+            refresh_latent_mask = self.spatial_refresh_latent_mask
+            should_calculate = not self.skip_this_step
+
+        valid_tokens = int(seq_lens[0].item())
+        refreshed = valid_tokens if refresh_token_mask is None else int(refresh_token_mask.sum().item())
+        self.spatial_refreshed_tokens += refreshed
+        self.spatial_total_tokens += valid_tokens
+
+    if hybrid_enabled:
+        valid_tokens = int(seq_lens[0].item())
+        if self.hybrid_decision == 'reuse':
+            refreshed = 0
+        elif self.hybrid_decision == 'partial':
+            refreshed = int(refresh_token_mask.sum().item())
+        else:
+            refreshed = valid_tokens
+        self.hybrid_refreshed_tokens += refreshed
+        self.hybrid_total_tokens += valid_tokens
 
     # Time embeddings
     with amp.autocast(dtype=torch.float32):
@@ -149,22 +259,61 @@ def sencache_forward(
     else:
         # CALCULATE: run transformer blocks and update cache
         ori_x_patched = x.clone()
-
-        for block in self.blocks:
-            x = block(x, **kwargs)
+        used_partial_query = False
+        if (getattr(self, 'partial_query_enabled', False) and
+                hybrid_enabled and self.hybrid_decision == 'partial'):
+            block_residuals = (self.block_residuals_cond if is_cond
+                               else self.block_residuals_uncond)
+            x, block_residuals = partial_query_stack(
+                self.blocks, x, refresh_token_mask, block_residuals, **kwargs)
+            if is_cond:
+                self.block_residuals_cond = block_residuals
+            else:
+                self.block_residuals_uncond = block_residuals
+            used_partial_query = True
+        elif getattr(self, 'partial_query_enabled', False):
+            x, block_residuals = dense_stack_with_residuals(
+                self.blocks, x, **kwargs)
+            if is_cond:
+                self.block_residuals_cond = block_residuals
+            else:
+                self.block_residuals_uncond = block_residuals
+        else:
+            for block in self.blocks:
+                x = block(x, **kwargs)
 
         new_residual = x - ori_x_patched
+
+        # Oracle: stock Wan attention computes all tokens, then this commits
+        # fresh residuals only for the selected spatio-temporal blocks.
+        if (local_refresh_enabled and refresh_token_mask is not None and
+                not used_partial_query):
+            cached_residual = self.cached_residual_cond if is_cond else self.cached_residual_uncond
+            new_residual = torch.where(refresh_token_mask, new_residual, cached_residual)
+            x = ori_x_patched + new_residual
 
         # Store residual (separate for cond/uncond since outputs differ)
         if is_cond:
             self.cached_residual_cond = new_residual.detach()
             # Update z/t reference point and refresh J norms for this timestep
-            self.cached_z = z_t.detach()
+            if local_refresh_enabled and self.cached_z is not None and refresh_latent_mask is not None:
+                self.cached_z = torch.where(refresh_latent_mask, z_t.detach(), self.cached_z)
+            else:
+                self.cached_z = z_t.detach()
             self.cached_t = t_val.detach()
-            current_t = t_val.item()
-            nearest_index = np.argmin(np.abs(self.sencache_timesteps_array - current_t))
-            self.cached_J_z_norm = self.J_z_norm[nearest_index]
-            self.cached_J_t_norm = self.J_t_norm[nearest_index]
+            if hybrid_enabled:
+                current_t_map = torch.full_like(z_t[:1], t_val.item())
+                if (local_refresh_enabled and self.cached_t_map is not None and
+                        refresh_latent_mask is not None):
+                    self.cached_t_map = torch.where(
+                        refresh_latent_mask[:1], current_t_map, self.cached_t_map)
+                else:
+                    self.cached_t_map = current_t_map
+            if not spatial_enabled:
+                current_t = t_val.item()
+                nearest_index = np.argmin(np.abs(self.sencache_timesteps_array - current_t))
+                self.cached_J_z_norm = self.J_z_norm[nearest_index]
+                self.cached_J_t_norm = self.J_t_norm[nearest_index]
         else:
             self.cached_residual_uncond = new_residual.detach()
 
@@ -187,12 +336,56 @@ def sencache_forward(
         self.cnt = 0
         self.cached_z = None
         self.cached_t = None
+        self.cached_t_map = None
         self.cached_residual_cond = None
         self.cached_residual_uncond = None
+        self.block_residuals_cond = None
+        self.block_residuals_uncond = None
         self.cached_J_z_norm = None
         self.cached_J_t_norm = None
         self.accumulated_skips = 0
         self.skip_this_step = False
+        if spatial_enabled:
+            ratio = (self.spatial_refreshed_tokens / self.spatial_total_tokens
+                     if self.spatial_total_tokens else 0.0)
+            logging.info(
+                f"[SpatialCache] theoretical refreshed tokens: "
+                f"{self.spatial_refreshed_tokens}/{self.spatial_total_tokens} "
+                f"({100 * ratio:.1f}%); DiT execution is oracle/full-density")
+            self.all_spatial_refresh_ratios.append(ratio)
+            self.spatial_refreshed_tokens = 0
+            self.spatial_total_tokens = 0
+            self.spatial_refresh_token_mask = None
+            self.spatial_refresh_latent_mask = None
+        if hybrid_enabled:
+            ratio = (self.hybrid_refreshed_tokens / self.hybrid_total_tokens
+                     if self.hybrid_total_tokens else 0.0)
+            partial_backend = ("partial-query" if self.partial_query_enabled
+                               else "oracle/full-density")
+            dense_calls = (self.hybrid_full_calls if self.partial_query_enabled
+                           else self.hybrid_full_calls + self.hybrid_partial_calls)
+            error_range = "n/a"
+            if self.hybrid_sensitivity_errors:
+                error_range = (f"{min(self.hybrid_sensitivity_errors):.2f}.."
+                               f"{max(self.hybrid_sensitivity_errors):.2f}")
+            logging.info(
+                f"[HybridCache] calls: reuse={self.hybrid_reuse_calls}, "
+                f"partial={self.hybrid_partial_calls}, full={self.hybrid_full_calls}; "
+                f"actual dense DiT calls={dense_calls}/{self.num_steps}; "
+                f"partial backend={partial_backend}; "
+                f"theoretical refreshed tokens={100 * ratio:.1f}%; "
+                f"sensitivity range={error_range}")
+            self.all_hybrid_refresh_ratios.append(ratio)
+            self.hybrid_reuse_calls = 0
+            self.hybrid_partial_calls = 0
+            self.hybrid_full_calls = 0
+            self.hybrid_refreshed_tokens = 0
+            self.hybrid_total_tokens = 0
+            self.hybrid_sensitivity_errors = []
+            self.hybrid_decision = 'full'
+            self.hybrid_refresh_ratio = None
+            self.spatial_refresh_token_mask = None
+            self.spatial_refresh_latent_mask = None
 
     return [u.float() for u in x]
 
@@ -294,6 +487,20 @@ def _parse_args():
                         help="SenCache: maximum consecutive steps to skip.")
     parser.add_argument("--no_sencache", action="store_true", default=False,
                         help="Disable SenCache (run standard inference).")
+    parser.add_argument("--spatial_cache", action="store_true", default=False,
+                        help="Use oracle block-wise latent-change refresh instead of SenCache.")
+    parser.add_argument("--spatial_cache_ratio", type=float, default=0.25,
+                        help="Fraction of spatio-temporal blocks refreshed per step.")
+    parser.add_argument("--spatial_cache_block", type=str, default="1,4,4",
+                        help="Token-grid block shape as T,H,W (default: 1,4,4).")
+    parser.add_argument("--hybrid_cache", action="store_true", default=False,
+                        help="SenCache with sensitivity-guided local block refresh.")
+    parser.add_argument("--hybrid_full_multiplier", type=float, default=2.0,
+                        help="Full-refresh threshold as a multiple of the SenCache threshold.")
+    parser.add_argument("--hybrid_min_ratio", type=float, default=0.10,
+                        help="Minimum block fraction for a local refresh.")
+    parser.add_argument("--partial_query_attention", action="store_true", default=False,
+                        help="Use experimental partial-query execution for Hybrid local refreshes.")
 
     args = parser.parse_args()
     _validate_args(args)
@@ -363,12 +570,14 @@ def _apply_sencache(pipeline, args, rank):
     logging.info(f"Rank {rank}: Applying SenCache patches...")
 
     try:
-        # Load pre-computed Jacobian sensitivity data (conditional only)
+        # Standalone spatial mode does not require precomputed Jacobian sensitivities.
         jacobian_path = "./sensitivity_wan21.npz"
         data = np.load(jacobian_path)
     except FileNotFoundError as e:
-        logging.error(f"FATAL: Jacobian .npz file not found: {e.filename}")
-        raise
+        if not args.spatial_cache or args.hybrid_cache:
+            logging.error(f"FATAL: Jacobian .npz file not found: {e.filename}")
+            raise
+        data = None
 
     SCALING_FACTOR = 1447.97790038 #set based on the shape of the latent to denormalize the threshold
     threshold_start = args.sencache_thresh_start * SCALING_FACTOR
@@ -378,9 +587,9 @@ def _apply_sencache(pipeline, args, rank):
     model.__class__.forward = sencache_forward
 
     # Jacobian norms (conditional only — used for both cond and uncond decisions)
-    model.J_z_norm = data['J_x_norm'].tolist()
-    model.J_t_norm = data['J_t_norm'].tolist()
-    model.sencache_timesteps_array = data['timesteps']
+    model.J_z_norm = data['J_x_norm'].tolist() if data is not None else []
+    model.J_t_norm = data['J_t_norm'].tolist() if data is not None else []
+    model.sencache_timesteps_array = data['timesteps'] if data is not None else np.array([])
 
     # Thresholds
     model.sencache_threshold_start = threshold_start
@@ -390,12 +599,57 @@ def _apply_sencache(pipeline, args, rank):
     # Cache state
     model.cached_z = None              # last computed conditional z_t
     model.cached_t = None              # last computed conditional t
+    model.cached_t_map = None          # per-region reference time for HybridCache
     model.cached_residual_cond = None  # residual from last conditional pass
     model.cached_residual_uncond = None  # residual from last unconditional pass
     model.cached_J_z_norm = None
     model.cached_J_t_norm = None
     model.accumulated_skips = 0
     model.skip_this_step = False       # decision flag shared between cond/uncond
+
+    if args.spatial_cache and args.hybrid_cache:
+        raise ValueError("--spatial_cache and --hybrid_cache are mutually exclusive")
+    if args.partial_query_attention and not args.hybrid_cache:
+        raise ValueError("--partial_query_attention requires --hybrid_cache")
+
+    # Spatial-cache oracle state, also used by HybridCache local refreshes.
+    model.spatial_cache_enabled = args.spatial_cache
+    model.hybrid_cache_enabled = args.hybrid_cache
+    model.partial_query_enabled = args.partial_query_attention
+    try:
+        model.spatial_cache_block_shape = tuple(
+            int(value.strip()) for value in args.spatial_cache_block.split(','))
+    except ValueError as exc:
+        raise ValueError("--spatial_cache_block must be T,H,W integers") from exc
+    if len(model.spatial_cache_block_shape) != 3 or any(
+            value <= 0 for value in model.spatial_cache_block_shape):
+        raise ValueError("--spatial_cache_block must contain three positive integers")
+    if not 0.0 <= args.spatial_cache_ratio <= 1.0:
+        raise ValueError("--spatial_cache_ratio must be in [0, 1]")
+    model.spatial_cache_refresh_ratio = args.spatial_cache_ratio
+    model.spatial_refresh_token_mask = None
+    model.spatial_refresh_latent_mask = None
+    model.spatial_refreshed_tokens = 0
+    model.spatial_total_tokens = 0
+    model.all_spatial_refresh_ratios = []
+
+    if args.hybrid_full_multiplier <= 1.0:
+        raise ValueError("--hybrid_full_multiplier must be greater than 1")
+    if not 0.0 < args.hybrid_min_ratio <= 1.0:
+        raise ValueError("--hybrid_min_ratio must be in (0, 1]")
+    model.hybrid_full_multiplier = args.hybrid_full_multiplier
+    model.hybrid_min_ratio = args.hybrid_min_ratio
+    model.hybrid_decision = 'full'
+    model.hybrid_refresh_ratio = None
+    model.hybrid_reuse_calls = 0
+    model.hybrid_partial_calls = 0
+    model.hybrid_full_calls = 0
+    model.hybrid_refreshed_tokens = 0
+    model.hybrid_total_tokens = 0
+    model.hybrid_sensitivity_errors = []
+    model.all_hybrid_refresh_ratios = []
+    model.block_residuals_cond = None
+    model.block_residuals_uncond = None
 
     # Counters
     model.cnt = 0
@@ -416,6 +670,16 @@ def _apply_sencache(pipeline, args, rank):
     logging.info(f"    thresh_main  = {args.sencache_thresh_main} (raw) -> {threshold_main:.2f} (scaled)")
     logging.info(f"    max consecutive skips (K) = {model.sencache_K}")
     logging.info(f"    skip zone = steps {model.ret_steps} to {model.cutoff_steps - 1}")
+    if model.spatial_cache_enabled:
+        logging.info(
+            f"    spatial oracle = ON, block={model.spatial_cache_block_shape}, "
+            f"refresh_ratio={model.spatial_cache_refresh_ratio}")
+    if model.hybrid_cache_enabled:
+        logging.info(
+            f"    hybrid cache = ON, block={model.spatial_cache_block_shape}, "
+            f"min_ratio={model.hybrid_min_ratio}, "
+            f"full_multiplier={model.hybrid_full_multiplier}, "
+            f"partial_backend={'partial-query' if model.partial_query_enabled else 'oracle'}")
 
     return True
 
@@ -509,7 +773,15 @@ def _save_output(video, args, item_prompt, item_index, cfg, rank, use_sencache):
     suffix = '.png' if "t2i" in args.task else '.mp4'
 
     cache_tag = ""
-    if use_sencache:
+    if use_sencache and args.hybrid_cache:
+        block_tag = args.spatial_cache_block.replace(',', 'x')
+        backend_tag = "_PQ" if args.partial_query_attention else ""
+        cache_tag = (f"_HybridCache{backend_tag}_F{args.hybrid_full_multiplier}"
+                     f"_R{args.hybrid_min_ratio}_B{block_tag}").replace(".", "")
+    elif use_sencache and args.spatial_cache:
+        block_tag = args.spatial_cache_block.replace(',', 'x')
+        cache_tag = f"_SpatialCache_R{args.spatial_cache_ratio}_B{block_tag}".replace(".", "")
+    elif use_sencache:
         cache_tag = (f"_SenCache_S{args.sencache_thresh_start}"
                      f"_M{args.sencache_thresh_main}"
                      f"_K{args.sencache_K}").replace(".", "")
@@ -751,6 +1023,8 @@ def generate(args):
 
     # --- Summary: skip statistics ---
     all_skip_counts = getattr(pipeline.model, 'all_skip_counts', None)
+    all_hybrid_refresh_ratios = getattr(
+        pipeline.model, 'all_hybrid_refresh_ratios', None)
     if all_skip_counts and len(all_skip_counts) > 0:
         total_calls = args.sample_steps * 2
         avg_skips = np.mean(all_skip_counts)
@@ -768,6 +1042,9 @@ def generate(args):
                 f.write(f"Average skipped calls per video: {avg_skips:.2f} / {total_calls}\n")
                 f.write(f"Skip percentage: {100 * avg_skips / total_calls:.1f}%\n")
                 f.write(f"Per-video skip counts: {all_skip_counts}\n")
+                if args.hybrid_cache and all_hybrid_refresh_ratios:
+                    f.write("Hybrid theoretical refreshed-token ratios: "
+                            f"{all_hybrid_refresh_ratios}\n")
             logging.info(f"Rank {rank}: Saved SenCache stats to {save_path}")
     elif use_sencache:
         logging.warning(f"Rank {rank}: No videos processed, no SenCache stats to report.")
