@@ -108,6 +108,10 @@ def main():
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
+        "--frames", type=int, default=17, help="Number of frames, 4k+1 and at least 5"
+    )
+    parser.add_argument("--cfg-tolerance", type=float, default=0.35)
+    parser.add_argument(
         "--prompts",
         type=Path,
         default=HERE / "test_prompt.json",
@@ -120,6 +124,10 @@ def main():
         help="Compare dense, original SenCache and D on its refresh steps",
     )
     opt = parser.parse_args()
+    if opt.frames < 5 or (opt.frames - 1) % 4:
+        parser.error("--frames must be 4k+1 and at least 5")
+    if not math.isfinite(opt.cfg_tolerance) or opt.cfg_tolerance < 0:
+        parser.error("--cfg-tolerance must be finite and nonnegative")
     opt.checkpoint = opt.checkpoint.resolve()
     out = opt.output.resolve()
     prompts = []
@@ -131,6 +139,23 @@ def main():
     if not prompts or any(p in CAL for p in prompts):
         parser.error("Provide test prompts distinct from the calibration set")
     out.mkdir(exist_ok=True, parents=True)
+    settings = dict(
+        checkpoint=opt.checkpoint.name,
+        frames=opt.frames,
+        steps=20,
+        size=[832, 480],
+        cfg=6,
+        cfg_tolerance=opt.cfg_tolerance,
+        seeds=opt.seeds,
+        prompts=prompts,
+        quick=opt.quick,
+    )
+    meta = out / "video_settings.json"
+    if meta.exists() and json.loads(meta.read_text(encoding="utf8")) != settings:
+        parser.error(
+            "This output directory contains a different experiment. Choose a new directory."
+        )
+    save(meta, settings)
     os.chdir(HERE)
     args = _parse_args(
         [
@@ -144,13 +169,13 @@ def main():
             "--sample_steps",
             "20",
             "--frame_num",
-            "17",
+            str(opt.frames),
             "--sample_guide_scale",
             "6",
             "--offload_model",
             "True",
             "--cfg_tolerance",
-            "0.35",
+            str(opt.cfg_tolerance),
         ]
     )
     config = WAN_CONFIGS[args.task]

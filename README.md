@@ -9,6 +9,10 @@ Yasaman Haghighi, Alexandre Alahi
   <a href="https://vita-epfl.github.io/SenCache.io/"><b>🌐 Website</b></a>
 </p>
 
+### 课程实验：缓存能省多少时间？
+
+[RealVisXL 文生图结果与样图](RealVisXL/results/REPORT.md) · [运行图像评测](RealVisXL/README.md) · [在 Wan2.1 上复验](Wan2.1/BENCHMARK.md)
+
 ---
 > **Method Description**
 <p align="center">

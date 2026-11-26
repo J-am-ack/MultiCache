@@ -1,0 +1,45 @@
+{
+  "model": "SG161222/RealVisXL_V4.0",
+  "hardware": {
+    "gpu": "NVIDIA GeForce RTX 5070 Laptop GPU",
+    "total_vram_mib": 8151,
+    "driver": "591.91",
+    "platform": "Windows"
+  },
+  "runtime": {
+    "python": "3.12.7",
+    "pytorch": "2.8.0+cu129",
+    "torchvision": "0.23.0",
+    "diffusers": "0.35.1",
+    "transformers": "4.54.1",
+    "accelerate": "1.9.0",
+    "numpy": "1.26.4",
+    "scikit_image": "0.24.0"
+  },
+  "inference": {
+    "size": [
+      512,
+      512
+    ],
+    "scheduler": "EulerDiscreteScheduler (checkpoint config)",
+    "cfg": 6,
+    "steps": 20,
+    "precision": "float16",
+    "component_cpu_offload": true,
+    "vae_tiling": true,
+    "watermarker": false
+  },
+  "evaluation": {
+    "test_seeds": [
+      42,
+      137,
+      2026
+    ],
+    "calibration_seed": 31,
+    "grounding_dino": "IDEA-Research/grounding-dino-base@12bdfa3120f3e7ec7b434d90674b3396eccf88eb",
+    "clip": "openai/clip-vit-base-patch32",
+    "warmup": "one native 20-step image before calibration/test",
+    "latency": "synchronized wall time for a single pipeline call; disk writes, scoring and checkpoint initialization excluded"
+  },
+  "wan_source": "Wan-Video/Wan2.1@9737cba9c1c3c4d04b33fcad41c111989865d315"
+}

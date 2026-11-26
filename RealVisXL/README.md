@@ -29,10 +29,20 @@
 准备 CUDA 版 PyTorch 和对应的 torchvision。在本次实测环境中，Python 为 3.12.7，PyTorch 为 2.8.0+cu129，torchvision 为 0.23.0，diffusers 为 0.35.1，transformers 为 4.54.1，accelerate 为 1.9.0。评测还用到 Pillow、NumPy、SciPy 和 scikit-image。下面从仓库根目录执行。MODEL 等大写名称代表你本地的模型目录。
 
 ```bash
+python -m pip install -r RealVisXL/requirements.txt
 python RealVisXL/bench.py MODEL outputs/realvis
 python RealVisXL/evaluate.py outputs/realvis GROUNDING_DINO outputs/report --clip CLIP
 python RealVisXL/audit_steps.py MODEL outputs/realvis/calibration.json outputs/report/step_audit.json
 python RealVisXL/detail_review.py outputs/realvis outputs/blind_sheets
+python RealVisXL/repeat_timing.py MODEL outputs/realvis/calibration.json outputs/report/repeat.json
+python RealVisXL/plot_results.py outputs/report
+```
+
+填完匿名细节评分后，运行以下两条命令，即可按同一个提示词和种子配对汇总每种策略的变化。
+
+```bash
+python RealVisXL/detail_review.py outputs/realvis outputs/blind_sheets --labels labels.json --report outputs/report/detail.json
+python RealVisXL/compare.py outputs/report
 ```
 
 - MODEL 是完整的 [RealVisXL V4.0 diffusers 目录](https://huggingface.co/SG161222/RealVisXL_V4.0)。管线使用 FP16、按组件卸载和 VAE 平铺。
@@ -48,3 +58,5 @@ python RealVisXL/detail_review.py outputs/realvis outputs/blind_sheets
 SSIM 和 PSNR 比较同种子原生 20 步的参考图。PSNR 完全相同的图记为 null，均值只统计有限值；`perfect_pairs` 单独给出相同图数量。主体分数是 Grounding DINO 在候选框中，对目标短语各词元取平均后的最高分。CLIP 衡量整句话与图像的匹配，数量、位置和拼字另看遮住方法名的样图。时间加速比取两组平均耗时之比；95% 区间对 12 条提示词作 5,000 次有放回抽样，同一句的三个种子一起抽取。
 
 额外的逐步检查让模型在每个候选步都真算，比较“如果此时用上一步输出”与真实引导输出之间的相对 L2 误差。每条测试提示词取种子 42，报告 18 个候选步里误差最大的 6 步，三种分数各找对几个。这个检查看单步预测误差，B 的校准看误差传到最后对成图的影响。
+
+分工图中的四条研究线分别参考了局部变化、预算分配、历史外推和 CFG 差值复用。对应论文为 [AdaCache](https://openaccess.thecvf.com/content/ICCV2025/html/Kahatapitiya_Adaptive_Caching_for_Faster_Video_Generation_with_Diffusion_Transformers_ICCV_2025_paper.html)、[BudCache](https://proceedings.mlr.press/v306/lei26j.html)、[TaylorSeer](https://openaccess.thecvf.com/content/ICCV2025/html/Liu_From_Reusing_to_Forecasting_Accelerating_Diffusion_Models_with_TaylorSeers_ICCV_2025_paper.html) 和 [FasterCache](https://vchitect.github.io/FasterCache/)。

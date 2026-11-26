@@ -1,9 +1,11 @@
 """Score saved lossless images, publish per-image data, paired intervals and browsable grids."""
 
 import argparse
+import io
 import json
 from pathlib import Path
 import shutil
+import zipfile
 import numpy as np
 from PIL import Image, ImageDraw
 from skimage.metrics import structural_similarity
@@ -162,6 +164,15 @@ def main():
     (report / "summary.json").write_text(json.dumps(results, indent=2), encoding="utf8")
     (report / "runs.json").write_text(json.dumps(rows, indent=2), encoding="utf8")
     shutil.copyfile(args.run / "calibration.json", report / "calibration.json")
+    samples = report / "samples"
+    samples.mkdir(exist_ok=True)
+    for case in CASES:
+        with zipfile.ZipFile(samples / (case["id"] + ".zip"), "w") as archive:
+            for row in (r for r in rows if r["case"] == case["id"]):
+                with Image.open(args.run / "images" / row["file"]) as image:
+                    data = io.BytesIO()
+                    image.save(data, format="JPEG", quality=90)
+                    archive.writestr(Path(row["file"]).with_suffix(".jpg").name, data.getvalue())
 
 
 if __name__ == "__main__":

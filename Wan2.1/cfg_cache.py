@@ -39,4 +39,3 @@ class CFGCache:
 
     def estimate_unconditional(self, cond):
         return cond - self.delta
-

@@ -1,0 +1,127 @@
+[
+  {
+    "repeat": 1,
+    "mode": "native20",
+    "seconds": 8.56437180005014
+  },
+  {
+    "repeat": 1,
+    "mode": "native14",
+    "seconds": 6.911637800047174
+  },
+  {
+    "repeat": 1,
+    "mode": "fixed",
+    "seconds": 6.939483300084248
+  },
+  {
+    "repeat": 1,
+    "mode": "B",
+    "seconds": 6.960875399992801
+  },
+  {
+    "repeat": 1,
+    "mode": "D",
+    "seconds": 6.103274299995974
+  },
+  {
+    "repeat": 2,
+    "mode": "native14",
+    "seconds": 6.413341599982232
+  },
+  {
+    "repeat": 2,
+    "mode": "fixed",
+    "seconds": 6.372271599946544
+  },
+  {
+    "repeat": 2,
+    "mode": "B",
+    "seconds": 6.1289153000107035
+  },
+  {
+    "repeat": 2,
+    "mode": "D",
+    "seconds": 6.361306800041348
+  },
+  {
+    "repeat": 2,
+    "mode": "native20",
+    "seconds": 7.439452599966899
+  },
+  {
+    "repeat": 3,
+    "mode": "fixed",
+    "seconds": 6.382151799974963
+  },
+  {
+    "repeat": 3,
+    "mode": "B",
+    "seconds": 6.647601700038649
+  },
+  {
+    "repeat": 3,
+    "mode": "D",
+    "seconds": 6.300501700025052
+  },
+  {
+    "repeat": 3,
+    "mode": "native20",
+    "seconds": 7.619250199990347
+  },
+  {
+    "repeat": 3,
+    "mode": "native14",
+    "seconds": 6.392036700039171
+  },
+  {
+    "repeat": 4,
+    "mode": "B",
+    "seconds": 6.109403499984182
+  },
+  {
+    "repeat": 4,
+    "mode": "D",
+    "seconds": 6.15452149999328
+  },
+  {
+    "repeat": 4,
+    "mode": "native20",
+    "seconds": 7.040659200050868
+  },
+  {
+    "repeat": 4,
+    "mode": "native14",
+    "seconds": 6.081523700035177
+  },
+  {
+    "repeat": 4,
+    "mode": "fixed",
+    "seconds": 6.04392970004119
+  },
+  {
+    "repeat": 5,
+    "mode": "D",
+    "seconds": 5.906810200074688
+  },
+  {
+    "repeat": 5,
+    "mode": "native20",
+    "seconds": 7.0890518999658525
+  },
+  {
+    "repeat": 5,
+    "mode": "native14",
+    "seconds": 5.981984999962151
+  },
+  {
+    "repeat": 5,
+    "mode": "fixed",
+    "seconds": 6.2580458000302315
+  },
+  {
+    "repeat": 5,
+    "mode": "B",
+    "seconds": 6.145200600032695
+  }
+]

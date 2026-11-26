@@ -21,6 +21,8 @@ python bench_video.py --checkpoint /path/to/Wan2.1-T2V-1.3B \
 
 提示词文件每行一句，也支持一行一个带 `prompt` 字段的 JSON 对象。模型在进程内加载一次。先用两句校准提示词分别跑全算，再逐个试跳第 1 至 18 步（从 0 编号），共 38 段校准视频，保存分数、各步影响和累计采样时间到 `video_profile.json`。后续在同一输出目录复用这份校准。更改权重或采样配置时另建输出目录。
 
+可用 `--frames 33` 改视频长度，用 `--cfg-tolerance 0.10` 调整 D 的回退门限。`video_settings.json` 记录本次实际采用的配置。
+
 | 设置 | 视频里实际做了什么 |
 |---|---|
 | native20、native14 | 调用原生 Wan，比较 20 步与直接减到 14 步。 |

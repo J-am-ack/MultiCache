@@ -63,6 +63,7 @@ def main():
     with torch.autocast("cuda", dtype=torch.bfloat16):
         for mode in [
             "native20",
+            "native14",
             "sencache",
             "calibrate",
             "probe",
@@ -82,15 +83,31 @@ def main():
             )
             assert torch.isfinite(video).all() and stats["branches"] == len(calls), mode
             assert type(net).forward is orig and net.bench_policy is None
+            if mode.startswith("native"):
+                assert len(calls) == 2 * int(mode[6:]), mode
+            if mode == "native20":
+                native_reference = video
             if mode in ("global", "A", "B", "fixed", "C", "C_guard", "sen_C"):
                 assert len(calls) == 28, mode
             if mode in ("D", "sen_D"):
                 assert 14 < len(calls) < 28, mode
             if mode == "calibrate":
                 assert len(scores) == 20 and len(calls) == 40
+                torch.testing.assert_close(video, native_reference, atol=1e-4, rtol=1e-4)
             if mode == "probe":
                 assert len(calls) == 38
             print(f"{mode}: {len(calls)} verified block-stack calls")
+
+        # Use SenCache's actual schedule, including reuse actions, as the source for D.
+        args.sencache_thresh_start = args.sencache_thresh_main = 1e9
+        args.sencache_K = 1
+        _, baseline, _ = sample(pipe, args, "fixture", 42, "sencache")
+        assert "reuse" in baseline["trace"]
+        calls.clear()
+        _, adapted, _ = sample(pipe, args, "fixture", 42, "sen_D", replay=baseline["trace"])
+        assert [a == "reuse" for a in baseline["trace"]] == [a == "reuse" for a in adapted["trace"]]
+        assert len(calls) == adapted["branches"] < baseline["branches"], (baseline, adapted, len(calls))
+        print("Verified replay of the original SenCache schedule with conditional-only steps.")
 
 
 if __name__ == "__main__":

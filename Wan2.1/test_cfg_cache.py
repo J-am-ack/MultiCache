@@ -46,4 +46,3 @@ if __name__ == "__main__":
     from wan.modules import model
     from sencache import _apply_sencache
     check(model, _apply_sencache)
-
