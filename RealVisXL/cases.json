@@ -1,0 +1,74 @@
+{
+  "calibration": [
+    {
+      "id": "bicycle",
+      "prompt": "A photograph of a yellow bicycle leaning against a weathered brick wall."
+    },
+    {
+      "id": "violin",
+      "prompt": "A photograph of a violin on a green velvet cushion next to a candle."
+    }
+  ],
+  "test": [
+    {
+      "id": "car",
+      "prompt": "A red sports car on a forest road, pine trees in the background.",
+      "subject": "red sports car"
+    },
+    {
+      "id": "lighthouse",
+      "prompt": "A white lighthouse on a cliff above dark blue ocean waves.",
+      "subject": "white lighthouse"
+    },
+    {
+      "id": "cat",
+      "prompt": "An orange tabby cat sitting on a wooden chair in a garden.",
+      "subject": "orange tabby cat"
+    },
+    {
+      "id": "teapot",
+      "prompt": "A green ceramic teapot on a wooden table with a small white teacup.",
+      "subject": "green teapot"
+    },
+    {
+      "id": "fox",
+      "prompt": "A red fox standing in snow, pine trees in the distance.",
+      "subject": "red fox"
+    },
+    {
+      "id": "boat",
+      "prompt": "A yellow sailboat on a blue lake with distant mountains.",
+      "subject": "yellow sailboat"
+    },
+    {
+      "id": "cups",
+      "prompt": "Exactly two blue ceramic mugs side by side on a table, the mug on the right has a white handle.",
+      "subject": "blue mug"
+    },
+    {
+      "id": "fruit",
+      "prompt": "A red apple on the left of a yellow banana, plain gray background.",
+      "subject": "red apple"
+    },
+    {
+      "id": "umbrella",
+      "prompt": "A person holding a small yellow umbrella on a busy rainy street.",
+      "subject": "yellow umbrella"
+    },
+    {
+      "id": "sign",
+      "prompt": "A blue street sign with the word PARK printed in large white letters.",
+      "subject": "blue street sign"
+    },
+    {
+      "id": "bird",
+      "prompt": "A tiny red bird perched on the upper right branch of a large bare tree.",
+      "subject": "red bird"
+    },
+    {
+      "id": "cubes",
+      "prompt": "Three wooden cubes in a horizontal row, red on the left, green in the middle, blue on the right.",
+      "subject": "wooden cube"
+    }
+  ]
+}

@@ -29,9 +29,9 @@ from wan.modules.model import sinusoidal_embedding_1d
 from wan.utils.fm_solvers import (FlowDPMSolverMultistepScheduler,
                                   get_sampling_sigmas, retrieve_timesteps)
 from wan.utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
-from wan.utils.prompt_extend import DashScopePromptExpander, QwenPromptExpander
 from wan.utils.utils import cache_image, cache_video, str2bool
 
+from cfg_cache import CFGCache
 from spatial_cache import block_refresh_masks, hybrid_refresh_ratio
 from partial_query import dense_stack_with_residuals, partial_query_stack
 
@@ -83,7 +83,13 @@ def sencache_forward(
 
     spatial_enabled = getattr(self, 'spatial_cache_enabled', False)
     hybrid_enabled = getattr(self, 'hybrid_cache_enabled', False)
-    if spatial_enabled:
+    bench = getattr(self, 'bench_policy', None)
+    if bench is not None and bench.mode != "sencache":
+        if is_cond:
+            self.skip_this_step = bench.skip(self, self.cnt // 2, z_t, t_val)
+            self.current_skip_count += 2 * int(self.skip_this_step)
+        should_calculate = not self.skip_this_step
+    elif spatial_enabled:
         # The conditional pass owns the mask; CFG-unconditional reuses it.
         if is_cond:
             self.skip_this_step = False
@@ -159,6 +165,23 @@ def sencache_forward(
         # UNCONDITIONAL pass: follow the decision made by the conditional pass
         should_calculate = not self.skip_this_step
 
+    cfg = getattr(self, 'cfg_cache', None)
+    if cfg is not None:
+        step = self.cnt // 2
+        if is_cond:
+            cfg.mode = cfg.choose(step, self.skip_this_step, self.num_steps // 2 - 1)
+            cfg.counts[cfg.mode] += 1
+        elif cfg.mode == "single" or (cfg.mode == "reuse" and cfg.last_refresh_single):
+            if cfg.mode == "single":
+                self.current_skip_count += 1
+                cfg.last_refresh_single = True
+            output = [cfg.estimate_unconditional(cfg.conditional)]
+            _finish_call(self, spatial_enabled, hybrid_enabled)
+            return output
+
+    if bench is not None and is_cond:
+        bench.trace.append(cfg.mode if cfg is not None else
+                           ("reuse" if self.skip_this_step else "full"))
     # --- Standard model embeddings ---
     x = [self.patch_embedding(u.unsqueeze(0)) for u in x]
     grid_sizes = torch.stack(
@@ -255,6 +278,8 @@ def sencache_forward(
     if not should_calculate:
         # SKIP: apply cached residual
         cached_residual = self.cached_residual_cond if is_cond else self.cached_residual_uncond
+        if bench is not None and bench.mode in ("C", "C_guard"):
+            cached_residual = bench.estimate(is_cond, self.cnt // 2, cached_residual)
         x = x + cached_residual
     else:
         # CALCULATE: run transformer blocks and update cache
@@ -293,6 +318,8 @@ def sencache_forward(
             x = ori_x_patched + new_residual
 
         # Store residual (separate for cond/uncond since outputs differ)
+        if bench is not None:
+            bench.remember(is_cond, self.cnt // 2, new_residual)
         if is_cond:
             self.cached_residual_cond = new_residual.detach()
             # Update z/t reference point and refresh J norms for this timestep
@@ -321,9 +348,25 @@ def sencache_forward(
     x = self.head(x, e)
     x = self.unpatchify(x, grid_sizes)
 
+    output = [u.float() for u in x]
+    if cfg is not None:
+        if is_cond:
+            cfg.conditional = output[0]
+        elif cfg.mode == "full":
+            cfg.observe_pair(step, cfg.conditional, output[0])
+    _finish_call(self, spatial_enabled, hybrid_enabled)
+    return output
+
+
+def _finish_call(self, spatial_enabled, hybrid_enabled):
     self.cnt += 1
     if self.cnt >= self.num_steps:
         # Log skip count for this generation
+        if getattr(self, 'cfg_cache', None) is not None:
+            counts = self.cfg_cache.counts
+            logging.info("[CFGCache] %s, dense branches=%d", counts,
+                         2 * counts["full"] + counts["single"])
+            self.cfg_cache.reset()
         self.all_skip_counts.append(self.current_skip_count)
         total_calls = self.num_steps
         logging.info(
@@ -387,7 +430,6 @@ def sencache_forward(
             self.spatial_refresh_token_mask = None
             self.spatial_refresh_latent_mask = None
 
-    return [u.float() for u in x]
 
 
 # =============================================================================
@@ -395,6 +437,11 @@ def sencache_forward(
 # =============================================================================
 
 def _validate_args(args):
+    if args.cfg_cache and (args.task != 't2v-1.3B' or args.no_sencache or
+                           args.hybrid_cache or args.spatial_cache or
+                           args.sample_guide_scale <= 1 or args.cfg_max_age < 1 or
+                           not math.isfinite(args.cfg_tolerance) or args.cfg_tolerance < 0):
+        raise ValueError("CFG cache needs t2v-1.3B, standard SenCache, CFG > 1, age >= 1 and a nonnegative finite tolerance")
     assert args.ckpt_dir is not None, "Please specify the checkpoint directory."
     assert args.task in WAN_CONFIGS, f"Unsupported task: {args.task}"
 
@@ -420,7 +467,7 @@ def _validate_args(args):
         f"Unsupported size {args.size} for task {args.task}, supported: {', '.join(SUPPORTED_SIZES[args.task])}"
 
 
-def _parse_args():
+def _parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description="Generate an image or video from a text prompt or image using Wan")
 
@@ -487,6 +534,9 @@ def _parse_args():
                         help="SenCache: maximum consecutive steps to skip.")
     parser.add_argument("--no_sencache", action="store_true", default=False,
                         help="Disable SenCache (run standard inference).")
+    parser.add_argument("--cfg_cache", action="store_true")
+    parser.add_argument("--cfg_tolerance", type=float, default=0.10)
+    parser.add_argument("--cfg_max_age", type=int, default=3)
     parser.add_argument("--spatial_cache", action="store_true", default=False,
                         help="Use oracle block-wise latent-change refresh instead of SenCache.")
     parser.add_argument("--spatial_cache_ratio", type=float, default=0.25,
@@ -502,7 +552,7 @@ def _parse_args():
     parser.add_argument("--partial_query_attention", action="store_true", default=False,
                         help="Use experimental partial-query execution for Hybrid local refreshes.")
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     _validate_args(args)
     return args
 
@@ -584,6 +634,8 @@ def _apply_sencache(pipeline, args, rank):
     threshold_main = args.sencache_thresh_main * SCALING_FACTOR
 
     model = pipeline.model
+    model.cfg_cache = (CFGCache(args.sample_guide_scale, args.cfg_tolerance, args.cfg_max_age)
+                       if args.cfg_cache else None)
     model.__class__.forward = sencache_forward
 
     # Jacobian norms (conditional only — used for both cond and uncond decisions)
@@ -786,6 +838,9 @@ def _save_output(video, args, item_prompt, item_index, cfg, rank, use_sencache):
                      f"_M{args.sencache_thresh_main}"
                      f"_K{args.sencache_K}").replace(".", "")
 
+    if use_sencache and args.cfg_cache:
+        cache_tag += f"_CFG_T{args.cfg_tolerance}_A{args.cfg_max_age}"
+
     if args.output_dir:
         idx_str = f"{item_index:04d}" if isinstance(item_index, int) else str(item_index)
         save_file = os.path.join(args.output_dir, f"{idx_str}_{safe_prompt}{cache_tag}{suffix}")
@@ -839,6 +894,7 @@ def generate(args):
     # Prompt extension
     prompt_expander = None
     if args.use_prompt_extend:
+        from wan.utils.prompt_extend import DashScopePromptExpander, QwenPromptExpander
         if args.prompt_extend_method == "dashscope":
             prompt_expander = DashScopePromptExpander(
                 model_name=args.prompt_extend_model,
@@ -1017,6 +1073,8 @@ def generate(args):
 
         except Exception as e:
             logging.error(f"Rank {rank} FAILED on item {item_index}: {e}", exc_info=True)
+            if args.cfg_cache:
+                raise
             continue
 
     logging.info(f"Rank {rank} finished generation loop.")
